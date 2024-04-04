@@ -1,0 +1,103 @@
+version: '3.4'
+
+x-common:
+  &common
+  image: apache/airflow:2.3.4
+  user: "${AIRFLOW_UID:-50000}:0" 
+  env_file: 
+    - .env
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./data:/opt/airflow/data
+    - ./models:/opt/airflow/models
+    - /var/run/docker.sock:/var/run/docker.sock
+
+x-depends-on:
+  &depends-on
+  depends_on:
+    postgres:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:13  # PostgreSQL Docker image version
+    container_name: postgres-m3  # Name of the PostgreSQL container
+    ports: 
+      - "5434:5432"  # Maps container port 5432 to host port 5434
+    healthcheck: 
+      test: ["CMD", "pg_isready", "-U", "airflow"]  # Command to check PostgreSQL readiness
+      interval: 5s  # Interval between health checks
+      retries: 5  # Number of retries for health checks
+    env_file:
+      - .env
+
+  scheduler:
+    <<: [*common, *depends-on]  # Inherits common and dependency configurations
+    container_name: airflow-scheduler-m3  # Name of the scheduler container
+    command: scheduler  # Command to run the scheduler
+    restart: on-failure 
+    ports: 
+      - "8793:8793"  # Maps container port 8793 to host port 8793
+
+  webserver:
+    <<: [*common, *depends-on]  # Inherits common and dependency configurations
+    container_name: airflow-webserver-m3  # Name of the webserver container
+    restart: always 
+    command: webserver  # Command to run the webserver
+    ports: 
+      - "8080:8080"  # Maps container port 8080 to host port 8080
+    healthcheck: 
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]  # Command to check webserver health
+      interval: 30s  # Interval between health checks
+      timeout: 30s # 30 seconds timeout
+      retries: 5  # Number of retries for health checks
+
+  airflow-init:
+    <<: *common  # Inherits common configurations
+    container_name: airflow-init-m3  # Name of the container
+    entrypoint: /bin/bash  # Entry point for the container
+    command:  # Command to execute inside the container
+      - -c
+      - |
+        mkdir -p /sources/logs /sources/dags /sources/plugins  # Creates necessary directories
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}  # Changes ownership of directories
+        exec /entrypoint airflow version  # Executes airflow version command
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1-arm64  # Elasticsearch Docker image version
+    container_name: elasticsearch-m3  # Name of the Elasticsearch container
+    restart: always 
+    environment: 
+      - xpack.security.enabled=false
+      - discovery.type=single-node
+      - xpack.reporting.capture.browser.chromium.disableSandbox=False
+      - xpack.reporting.enabled:False
+    ulimits:
+      memlock:
+        soft: 50000 
+        hard: 50000 
+      nofile:
+        soft: 65536 
+        hard: 65536 
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    ports:
+      - 9200:9200
+  kibana:
+    container_name: kibana-m3  # Name of the Kibana container
+    image: docker.elastic.co/kibana/kibana:8.11.1-arm64  # Kibana Docker image version
+    restart: always 
+    environment: 
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200  # Address of Elasticsearch container
+    ports: 
+      - 5601:5601  # Maps container port 5601 to host port 5601
+    depends_on: 
+      - elasticsearch  # Kibana starts when Elasticsearch has started
+volumes:
+  elasticsearch-data: 
